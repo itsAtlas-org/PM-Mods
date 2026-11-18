@@ -33,9 +33,13 @@ const entry = (over = {}) => ({
 });
 const text = (mods) => JSON.stringify({ format: 1, mods });
 
-test("the committed catalogue and blacklist are valid and empty to begin with", () => {
-  assert.deepEqual(parseCatalogue(readFileSync(new URL("../catalogue.json", import.meta.url), "utf8")), []);
-  assert.deepEqual(parseBlacklist(readFileSync(new URL("../blacklist.json", import.meta.url), "utf8")), []);
+// The committed files grow with every publish, so this checks that they are valid and in the one written
+// form (what add-entry writes), not what they hold.
+test("the committed catalogue and blacklist are valid and in their written form", () => {
+  const catalogue = readFileSync(new URL("../catalogue.json", import.meta.url), "utf8");
+  const blacklist = readFileSync(new URL("../blacklist.json", import.meta.url), "utf8");
+  assert.equal(serializeCatalogue(parseCatalogue(catalogue)), catalogue);
+  assert.equal(serializeBlacklist(parseBlacklist(blacklist)), blacklist);
 });
 
 test("a catalogue is parsed strictly and keeps one order", () => {

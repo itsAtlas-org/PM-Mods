@@ -1,4 +1,16 @@
 {
   "format": 1,
-  "mods": []
+  "mods": [
+    {
+      "id": "atlas.map",
+      "version": "1.1.0",
+      "tier": "first",
+      "author": "Atlas",
+      "repo": "itsAtlas-org/Personal-Manager",
+      "commit": "adac0d5ac5f6fc8ba563b8d7bd4ff14e94402c05",
+      "path": "mods/atlas.map",
+      "unsignedSha256": "6efd0b257b00b8b4a77ab9a593282a1eb1a129380e01eca97c07372558ce8909",
+      "licence": "AGPL-3.0-or-later"
+    }
+  ]
 }
