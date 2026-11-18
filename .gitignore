@@ -6,4 +6,5 @@
 signed/
 unsigned/
 out/
+recovered/
 node_modules/

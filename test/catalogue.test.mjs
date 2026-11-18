@@ -6,9 +6,11 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { entryFromManifest, withEntry } from "../scripts/add-entry.mjs";
+import { unpublishedAmong } from "../scripts/check.mjs";
 import {
   appendedEntries,
   CATALOGUE_FIELDS,
+  changedOrRemoved,
   latestPerId,
   parseBlacklist,
   parseCatalogue,
@@ -95,6 +97,36 @@ test("entries are append-only history", () => {
   expectRefusal(() => appendedEntries(added, base), /removed/);
   expectRefusal(() => appendedEntries(base, parseCatalogue(text([entry({ unsignedSha256: sha256("y") })]))), /changed/);
   expectRefusal(() => appendedEntries(base, parseCatalogue(text([entry({ commit: "1".repeat(40) })]))), /changed/);
+});
+
+test("an entry whose release was never published may be amended or removed; a published one never", async () => {
+  const base = parseCatalogue(text([entry(), entry({ version: "1.1.0" })]));
+  const fixed = parseCatalogue(text([entry(), entry({ version: "1.1.0", unsignedSha256: sha256("z") })]));
+  const dropped = parseCatalogue(text([entry()]));
+  const tag = "atlas.map-v1.1.0";
+  // Unpublished (a clean 404 for the asset): amended -> rebuilt in the PR; removed -> gone.
+  assert.deepEqual(appendedEntries(base, fixed, { unpublished: new Set([tag]) }).map((e) => e.version), ["1.1.0"]);
+  assert.deepEqual(appendedEntries(base, dropped, { unpublished: new Set([tag]) }), []);
+  // The other entry stays protected, and so does the one when the caller says nothing about it.
+  expectRefusal(() => appendedEntries(base, fixed, { unpublished: new Set(["atlas.map-v1.0.0"]) }), /atlas.map-v1.1.0 was changed/);
+  expectRefusal(() => appendedEntries(base, dropped), /was removed/);
+  const firstChanged = parseCatalogue(text([entry({ unsignedSha256: sha256("q") }), entry({ version: "1.1.0" })]));
+  expectRefusal(() => appendedEntries(base, firstChanged, { unpublished: new Set([tag]) }), /atlas.map-v1.0.0 was changed/);
+  assert.deepEqual(changedOrRemoved(base, fixed).map((e) => e.version), ["1.1.0"]);
+
+  // The check's own test of "unpublished": a public 404 only. A published asset, or any failure, is not.
+  const asked = [];
+  const answers = { "1.0.0": Buffer.from("there"), "1.1.0": null };
+  const get = async (url) => {
+    asked.push(url);
+    if (url.includes("boom")) throw new Error("HTTP 502");
+    return answers[/-(\d+\.\d+\.\d+)\.pmmod$/.exec(url)[1]];
+  };
+  const both = parseCatalogue(text([]));
+  assert.deepEqual([...(await unpublishedAmong(base, both, get))].sort(), [tag]);
+  assert.equal(asked.length, 2);
+  assert.deepEqual([...(await unpublishedAmong(base, base, get))], [], "nothing changed, nothing asked");
+  await assert.rejects(unpublishedAmong(base, both, async () => { throw new Error("HTTP 502"); }), /HTTP 502/);
 });
 
 test("the latest version of each id is what the index lists", () => {

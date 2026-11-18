@@ -154,8 +154,12 @@ test("constants and keys equal PM's sources (needs PM_CHECKOUT)", { skip: !pm ||
   assert.match(index, /pub const MAX_REVOKED: usize = 16;/);
   assert.match(index, /pub const INDEX_CAP: usize = 1 << 20;/);
   assert.match(index, /pub const SIGNATURE_CAP: usize = 4 << 10;/);
-  for (const k of ATLAS_MOD_KEYS) {
-    assert.ok(keys.includes(`id: "${k.id}"`), `${k.role} id`);
-    assert.ok(keys.includes(`public: "${k.public}"`), `${k.role} public key`);
-  }
+  // The table in keys.rs, role by role: a main/rollover swap here would not be caught by "the strings appear".
+  const block = /pub const ATLAS_MOD_KEYS: \[EmbeddedKey; \d+\] = \[([\s\S]*?)\n\];/.exec(keys)[1];
+  const embedded = [...block.matchAll(/role: KeyRole::(\w+),\s*id: "([0-9A-F]{16})",\s*public: "([A-Za-z0-9+/=]+)"/g)].map((m) => ({
+    role: m[1].toLowerCase(),
+    id: m[2],
+    public: m[3],
+  }));
+  assert.deepEqual(embedded, ATLAS_MOD_KEYS);
 });

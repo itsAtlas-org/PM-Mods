@@ -13,10 +13,11 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { describePackage } from "../scripts/describe-package.mjs";
+import { buildIndex, signIndex, validityWindow } from "../scripts/lib/index.mjs";
 import { outputsFor, pendingEntries } from "../scripts/plan.mjs";
 import { publish } from "../scripts/publish.mjs";
 import { planFault } from "../scripts/verify-published.mjs";
-import { sha256, unsignedPackage } from "./helpers.mjs";
+import { ephemeralRing, sha256, unsignedPackage } from "./helpers.mjs";
 
 const dirs = [];
 const scratch = () => {
@@ -40,8 +41,21 @@ test("plan: pending is what isn't published, and the outputs are two one-line va
   assert.equal(outputsFor([], []), "pending=[]\nempty=true\n");
 });
 
+/** The live index pair at `seq` (a real one, signed by the test ring), or the absence of one for null. */
+function liveAt(seq) {
+  if (seq === null) return async () => null;
+  const { main } = ephemeralRing();
+  const built = buildIndex({ ...validityWindow(new Date("2026-12-01T00:00:00Z")), seq, mods: [], blacklist: [] });
+  const pair = { json: built.bytes, signature: signIndex(main.key, built.bytes, built.parsed) };
+  return async () => pair;
+}
+const keys = () => ephemeralRing().publicKeys;
+const noSleep = async () => {};
+/** Publish's inputs for a live index at `liveSeq` (null: none), under the test ring. */
+const ctx = (liveSeq = 2) => ({ publicKeys: keys(), sleep: noSleep, live: liveAt(liveSeq) });
+
 /** A folder laid out as sign.mjs writes it, with a fake package and index. */
-function signedDir({ fresh = true } = {}) {
+function signedDir({ fresh = true, seq = 3 } = {}) {
   const dir = scratch();
   const pkg = Buffer.from("signed package bytes");
   const index = Buffer.from('{"index":true}\n');
@@ -49,7 +63,7 @@ function signedDir({ fresh = true } = {}) {
   writeFileSync(join(dir, "index.json"), index);
   writeFileSync(join(dir, "index.json.minisig"), "sig");
   const plan = {
-    seq: 3,
+    seq,
     expires: "2027-01-01T00:00:00.000Z",
     indexSha256: sha256(index),
     packages: [{ tag: "atlas.map-v1.1.0", asset: "atlas.map-1.1.0.pmmod", fresh, sha256: sha256(pkg) }],
@@ -77,9 +91,9 @@ const never = async () => assert.fail("nothing should have been downloaded");
 const quiet = () => {};
 
 test("publish: a first publish creates the package release, then the index release, packages first", async () => {
-  const { dir } = signedDir();
+  const { dir } = signedDir({ seq: 1 });
   const { gh, writes } = fakeGh(new Map());
-  await publish({ dir, repo: REPO, sha: SHA, gh, read: never, log: quiet });
+  await publish({ dir, repo: REPO, sha: SHA, gh, read: never, log: quiet, ...ctx(null) });
   const w = writes();
   assert.equal(w.length, 2);
   assert.deepEqual(w[0].slice(0, 3), ["release", "create", "atlas.map-v1.1.0"]);
@@ -98,7 +112,7 @@ test("publish: a first publish creates the package release, then the index relea
 test("publish: an existing index release has its assets replaced; a missing package asset is added without --clobber", async () => {
   const { dir } = signedDir();
   const { gh, writes } = fakeGh(new Map([["atlas.map-v1.1.0", []], ["index", ["index.json", "index.json.minisig"]]]));
-  await publish({ dir, repo: REPO, sha: SHA, gh, read: never, log: quiet });
+  await publish({ dir, repo: REPO, sha: SHA, gh, read: never, log: quiet, ...ctx() });
   const [pkg, index] = writes();
   assert.deepEqual(pkg.slice(0, 3), ["release", "upload", "atlas.map-v1.1.0"]);
   assert.ok(!pkg.includes("--clobber"));
@@ -110,50 +124,135 @@ test("publish: a package asset that is already there must be byte-identical, and
   const { dir, pkg } = signedDir();
   const releases = new Map([["atlas.map-v1.1.0", ["atlas.map-1.1.0.pmmod"]], ["index", ["index.json", "index.json.minisig"]]]);
   const same = fakeGh(releases);
-  await publish({ dir, repo: REPO, sha: SHA, gh: same.gh, read: async () => pkg, log: quiet });
+  await publish({ dir, repo: REPO, sha: SHA, gh: same.gh, read: async () => pkg, log: quiet, ...ctx() });
   assert.equal(same.writes().length, 1, "only the index upload");
   assert.equal(same.writes()[0][2], "index");
 
   const other = fakeGh(releases);
   await assert.rejects(
-    publish({ dir, repo: REPO, sha: SHA, gh: other.gh, read: async () => Buffer.from("different"), log: quiet }),
+    publish({ dir, repo: REPO, sha: SHA, gh: other.gh, read: async () => Buffer.from("different"), log: quiet, ...ctx() }),
     /burned/,
   );
   assert.equal(other.writes().length, 0, "nothing was uploaded after the refusal");
-  await assert.rejects(publish({ dir, repo: REPO, sha: SHA, gh: fakeGh(releases).gh, read: async () => null, log: quiet }), /burned/);
+  await assert.rejects(publish({ dir, repo: REPO, sha: SHA, gh: fakeGh(releases).gh, read: async () => null, log: quiet, ...ctx() }), /burned/);
 });
 
 test("publish: an already-published package is skipped, and only the index goes up", async () => {
   const { dir } = signedDir({ fresh: false });
   const { gh, writes } = fakeGh(new Map([["index", ["index.json", "index.json.minisig"]]]));
-  await publish({ dir, repo: REPO, sha: SHA, gh, read: never, log: quiet });
+  await publish({ dir, repo: REPO, sha: SHA, gh, read: never, log: quiet, ...ctx() });
   assert.equal(writes().length, 1);
 });
 
 test("publish: gh failing for any reason but 'not found' stops the run before it writes", async () => {
   const { dir } = signedDir();
   const { gh, writes } = fakeGh(new Map(), { viewError: "HTTP 502: Bad Gateway" });
-  await assert.rejects(publish({ dir, repo: REPO, sha: SHA, gh, read: never, log: quiet }), /failed: HTTP 502/);
+  await assert.rejects(publish({ dir, repo: REPO, sha: SHA, gh, read: never, log: quiet, ...ctx() }), /failed: HTTP 502/);
   assert.equal(writes().length, 0);
   const failing = async (args) => (args[1] === "view" ? { code: 1, stdout: "", stderr: "release not found" } : { code: 1, stdout: "", stderr: "denied" });
-  await assert.rejects(publish({ dir, repo: REPO, sha: SHA, gh: failing, read: never, log: quiet }), /denied/);
+  await assert.rejects(publish({ dir, repo: REPO, sha: SHA, gh: failing, read: never, log: quiet, ...ctx() }), /denied/);
 });
 
 test("publish: refuses a plan that doesn't describe the files, and odd names or inputs", async () => {
   const a = signedDir();
   writeFileSync(join(a.dir, "index.json"), "tampered\n");
-  await assert.rejects(publish({ dir: a.dir, repo: REPO, sha: SHA, gh: fakeGh(new Map()).gh, read: never, log: quiet }), /index\.json isn't the one/);
+  await assert.rejects(publish({ dir: a.dir, repo: REPO, sha: SHA, gh: fakeGh(new Map()).gh, read: never, log: quiet, ...ctx() }), /index\.json isn't the one/);
   const b = signedDir();
   writeFileSync(join(b.dir, "atlas.map-1.1.0.pmmod"), "tampered");
-  await assert.rejects(publish({ dir: b.dir, repo: REPO, sha: SHA, gh: fakeGh(new Map()).gh, read: never, log: quiet }), /isn't the one the plan/);
+  await assert.rejects(publish({ dir: b.dir, repo: REPO, sha: SHA, gh: fakeGh(new Map()).gh, read: never, log: quiet, ...ctx() }), /isn't the one the plan/);
   const c = signedDir();
   const plan = JSON.parse(readFileSync(join(c.dir, "plan.json"), "utf8"));
   plan.packages[0].asset = "../evil.pmmod";
   writeFileSync(join(c.dir, "plan.json"), JSON.stringify(plan));
-  await assert.rejects(publish({ dir: c.dir, repo: REPO, sha: SHA, gh: fakeGh(new Map()).gh, read: never, log: quiet }), /names a release or file it shouldn't/);
+  await assert.rejects(publish({ dir: c.dir, repo: REPO, sha: SHA, gh: fakeGh(new Map()).gh, read: never, log: quiet, ...ctx() }), /names a release or file it shouldn't/);
   const d = signedDir();
-  await assert.rejects(publish({ dir: d.dir, repo: "no-slash", sha: SHA, gh: fakeGh(new Map()).gh, read: never, log: quiet }), /owner\/repo/);
-  await assert.rejects(publish({ dir: d.dir, repo: REPO, sha: "main", gh: fakeGh(new Map()).gh, read: never, log: quiet }), /commit/);
+  await assert.rejects(publish({ dir: d.dir, repo: "no-slash", sha: SHA, gh: fakeGh(new Map()).gh, read: never, log: quiet, ...ctx() }), /owner\/repo/);
+  await assert.rejects(publish({ dir: d.dir, repo: REPO, sha: "main", gh: fakeGh(new Map()).gh, read: never, log: quiet, ...ctx() }), /commit/);
+});
+
+test("publish: the live index must be exactly the seq this run signed on top of, or nothing is replaced", async () => {
+  const idx = (gh) => gh.writes().filter((c) => c[2] === "index");
+  for (const liveSeq of [null, 1, 3, 4]) {
+    const { dir } = signedDir({ seq: 3 });
+    const gh = fakeGh(new Map([["atlas.map-v1.1.0", ["atlas.map-1.1.0.pmmod"]], ["index", ["index.json", "index.json.minisig"]]]));
+    await assert.rejects(
+      publish({ dir, repo: REPO, sha: SHA, gh: gh.gh, read: async () => Buffer.from("signed package bytes"), log: quiet, ...ctx(liveSeq) }),
+      /another publish got there first/,
+      `live ${liveSeq}`,
+    );
+    assert.equal(idx(gh).length, 0, `live ${liveSeq}: the index was left alone`);
+  }
+  // A live pair that doesn't verify under the pinned keys is not a basis either.
+  const { dir } = signedDir({ seq: 3 });
+  const gh = fakeGh(new Map([["atlas.map-v1.1.0", ["atlas.map-1.1.0.pmmod"]], ["index", ["index.json", "index.json.minisig"]]]));
+  const bad = { ...ctx(2), live: async () => ({ json: Buffer.from("{}"), signature: Buffer.from("sig") }) };
+  await assert.rejects(publish({ dir, repo: REPO, sha: SHA, gh: gh.gh, read: async () => Buffer.from("signed package bytes"), log: quiet, ...bad }), /live index doesn't verify/);
+  assert.equal(idx(gh).length, 0);
+});
+
+test("publish: the default live read goes through gh (the API), as a pair that verifies", async () => {
+  const { dir } = signedDir({ seq: 3 });
+  const pair = await liveAt(2)();
+  const releases = new Map([["atlas.map-v1.1.0", ["atlas.map-1.1.0.pmmod"]], ["index", ["index.json", "index.json.minisig"]]]);
+  const base = fakeGh(releases);
+  const gh = async (args) => {
+    if (args[1] === "download") {
+      const to = args[args.indexOf("--dir") + 1];
+      writeFileSync(join(to, "index.json"), pair.json);
+      writeFileSync(join(to, "index.json.minisig"), pair.signature);
+      base.calls.push(args);
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    return base.gh(args);
+  };
+  const { live: _unused, ...rest } = ctx();
+  await publish({ dir, repo: REPO, sha: SHA, gh, read: async () => Buffer.from("signed package bytes"), log: quiet, ...rest });
+  assert.ok(base.calls.some((c) => c[1] === "download"), "read through gh release download");
+  assert.equal(base.writes().filter((c) => c[1] === "upload" && c[2] === "index").length, 1);
+});
+
+test("publish: a failed index replacement is retried, and gives up with the recovery pointer", async () => {
+  const releases = new Map([["atlas.map-v1.1.0", ["atlas.map-1.1.0.pmmod"]], ["index", ["index.json", "index.json.minisig"]]]);
+  const flaky = (failures) => {
+    const base = fakeGh(releases);
+    let left = failures;
+    const uploads = [];
+    const gh = async (args) => {
+      if (args[1] === "upload" && args[2] === "index") {
+        uploads.push(args);
+        if (left-- > 0) return { code: 1, stdout: "", stderr: "HTTP 502: upload interrupted" };
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return base.gh(args);
+    };
+    return { gh, uploads };
+  };
+  const run = (gh) => publish({ dir: signedDir().dir, repo: REPO, sha: SHA, gh, read: async () => Buffer.from("signed package bytes"), log: quiet, ...ctx() });
+  const twice = flaky(2);
+  await run(twice.gh);
+  assert.equal(twice.uploads.length, 3, "two failures, then it went through");
+  assert.ok(twice.uploads.every((u) => u.includes("--clobber")));
+  const never = flaky(99);
+  await assert.rejects(run(never.gh), /could not be written after 3 attempts[\s\S]*incomplete[\s\S]*signed-index/);
+  assert.equal(never.uploads.length, 3);
+});
+
+test("publish: a first index release that failed half-way is finished by uploading, not by creating again", async () => {
+  // The first attempt's `release create` fails after the release exists (gh creates, then uploads assets).
+  const releases = new Map([["atlas.map-v1.1.0", ["atlas.map-1.1.0.pmmod"]]]);
+  const base = fakeGh(releases);
+  const calls = [];
+  const gh = async (args) => {
+    if (args[0] === "release" && args[1] === "create" && args[2] === "index") {
+      calls.push(args[1]);
+      releases.set("index", []);
+      return { code: 1, stdout: "", stderr: "asset upload failed" };
+    }
+    if (args[1] === "upload" && args[2] === "index") calls.push(args[1]);
+    return base.gh(args);
+  };
+  await publish({ dir: signedDir({ seq: 1 }).dir, repo: REPO, sha: SHA, gh, read: async () => Buffer.from("signed package bytes"), log: quiet, ...ctx(null) });
+  assert.deepEqual(calls, ["create", "upload"]);
 });
 
 test("verify-published --plan: the live index must be the one just uploaded", () => {

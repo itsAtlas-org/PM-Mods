@@ -39,6 +39,8 @@ test("the pin reader finds every uses: and holds each to a SHA plus a comment", 
   assert.deepEqual(findUses("name: the step `uses: foo/bar@v1` is described here\n"), []);
 });
 
+const PUBLISH_ENV = "        env:\n          GH_TOKEN: ${{ github.token }}\n        run: node scripts/publish.mjs signed";
+const LIVE_ENV = "        env:\n          GH_TOKEN: ${{ github.token }}\n        run: node scripts/live-index.mjs";
 const SIGN_USES = "      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2";
 const cases = [
   ["a tag instead of a SHA", "publish.yml", publish, "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0", "actions/setup-node@v7", /tag or branch/],
@@ -47,8 +49,12 @@ const cases = [
   ["workflow_run", "publish.yml", publish, "  workflow_dispatch:\n    inputs:", "  workflow_run:\n  workflow_dispatch:\n    inputs:", /never used here/],
   ["a secret in the dry run", "dry-run.yml", dryRun, "          BASE_SHA: ${{ github.event.pull_request.base.sha }}", "          BASE_SHA: ${{ github.event.pull_request.base.sha }}\n          X: ${{ secrets.ATLAS_MOD_SIGNING_KEY }}", /secrets are referenced only/],
   ["secrets: inherit", "dry-run.yml", dryRun, "    name: Tests and gates\n", "    name: Tests and gates\n    secrets: inherit\n", /secrets are referenced only/],
-  ["a third secret in publish.yml", "publish.yml", publish, "          GH_TOKEN: ${{ github.token }}", "          GH_TOKEN: ${{ secrets.OTHER }}", /secrets are referenced only/],
-  ["the key in the publish step", "publish.yml", publish, "          GH_TOKEN: ${{ github.token }}", "          K: ${{ secrets.ATLAS_MOD_SIGNING_KEY }}", /secrets are referenced only/],
+  ["a third secret in publish.yml", "publish.yml", publish, PUBLISH_ENV, PUBLISH_ENV.replace("${{ github.token }}", "${{ secrets.OTHER }}"), /secrets are referenced only/],
+  ["the key in the publish step", "publish.yml", publish, PUBLISH_ENV, PUBLISH_ENV.replace("GH_TOKEN: ${{ github.token }}", "K: ${{ secrets.ATLAS_MOD_SIGNING_KEY }}"), /secrets are referenced only/],
+  ["the key in the live-index step", "publish.yml", publish, LIVE_ENV, LIVE_ENV.replace("GH_TOKEN: ${{ github.token }}", "K: ${{ secrets.ATLAS_MOD_SIGNING_KEY_PASSWORD }}"), /secrets are referenced only/],
+  ["build artifacts extracted into the checkout", "publish.yml", publish, "path: ${{ runner.temp }}/unsigned", "path: unsigned", /extract under \$\{\{ runner.temp \}\}/],
+  ["a download-artifact with no path", "publish.yml", publish, "          path: ${{ runner.temp }}/unsigned\n", "", /extract under/],
+  ["another action in the sign job (upload-artifact is the one allowed)", "publish.yml", publish, SIGN_USES, `${SIGN_USES}\n      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0`, /may use only/],
   ["the key in the build job", "publish.yml", publish, "          MOD_ID: ${{ matrix.id }}", "          MOD_ID: ${{ matrix.id }}\n          K: ${{ secrets.ATLAS_MOD_SIGNING_KEY }}", /secrets are referenced only/],
   ["an environment on the build job", "publish.yml", publish, "    # No secret exists in this job, and the token cannot write. It runs code from the pinned source commit.\n", "    environment: mod-signing\n", /only the sign job has an environment/],
   ["an environment in the dry run", "dry-run.yml", dryRun, "  rebuild:\n    name: Rebuild ${{ matrix.id }} ${{ matrix.version }}\n", "  rebuild:\n    name: Rebuild ${{ matrix.id }} ${{ matrix.version }}\n    environment: mod-signing\n", /only the sign job has an environment/],
@@ -64,7 +70,7 @@ const cases = [
   ["npm in the sign job", "publish.yml", publish, "        run: node --version && gh --version", "        run: npm ci && node --version", /runs no npm/],
   ["the source checkout in the sign job", "publish.yml", publish, "        run: node scripts/publish.mjs signed", "        run: node src/scripts/pack-mod.mjs", /runs no npm/],
   ["setup-node in the sign job", "publish.yml", publish, SIGN_USES, `${SIGN_USES}\n      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0`, /may use only/],
-  ["a repository checkout in the sign job", "publish.yml", publish, "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n      - uses: actions/download-artifact", "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          repository: acme/other\n          persist-credentials: false\n      - uses: actions/download-artifact", /this repo only/],
+  ["a repository checkout in the sign job", "publish.yml", publish, "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n      # Outside the checkout", "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          repository: acme/other\n          persist-credentials: false\n      # Outside the checkout", /this repo only/],
   ["a checkout that keeps its credentials", "dry-run.yml", dryRun, "          fetch-depth: 0\n          persist-credentials: false", "          fetch-depth: 0", /persist-credentials/],
   ["a different trigger set", "publish.yml", publish, "  schedule:\n    - cron:", "  pull_request:\n  schedule:\n    - cron:", /triggers are/],
   ["a job without a name", "publish.yml", publish, "    name: Plan\n", "", /has no name/],
@@ -79,7 +85,7 @@ test("an unknown workflow file is refused until its triggers are declared", () =
 
 test("tracked-file gate: keys, packages, loose signatures, dependencies and build output", () => {
   assert.deepEqual(trackedFileProblems(["README.md", "scripts/sign.mjs", "test/vectors/throwaway-index.json.minisig", "catalogue.json"]), []);
-  for (const f of ["atlas.key", "x/signing.pem", "a.pmmod", "index.json.minisig", "package.json", "sub/package-lock.json", "node_modules/x/y.js", "signed/index.json", "out/a.pmmod"]) {
+  for (const f of ["atlas.key", "x/signing.pem", "a.pmmod", "index.json.minisig", "package.json", "sub/package-lock.json", "node_modules/x/y.js", "signed/index.json", "out/a.pmmod", "recovered/index.json"]) {
     assert.equal(trackedFileProblems([f]).length, 1, f);
   }
 });

@@ -4,14 +4,22 @@
 // The sign job's one step that holds the secrets (the publish workflow runs it in the mod-signing
 // environment). Zero dependencies, no code from the PM checkout.
 //
-//   node scripts/sign.mjs --unsigned DIR --out DIR    sign what the catalogue pins, build and sign the index
+//   node scripts/sign.mjs --unsigned DIR --live DIR --out DIR [--allow-unbuilt]
+//                                                      sign what the catalogue pins, build and sign the index
 //   node scripts/sign.mjs --key-check-only            decrypt the key, require it is the pinned MAIN key,
 //                                                      sign a probe and verify it; writes nothing
 //
 // Env: ATLAS_MOD_SIGNING_KEY (the key file as `tauri signer generate` writes it, base64) and
 // ATLAS_MOD_SIGNING_KEY_PASSWORD. Nothing here widens trust: the two public keys are pinned in
 // lib/keys.mjs and the main key is the only one this signs with (the rollover key is offline).
-// DIR/<id>-<version>.unsigned.pmmod is the build job's output for each catalogue entry not yet published.
+// --unsigned DIR: the build job's output, DIR/<id>-<version>.unsigned.pmmod for each catalogue entry not
+//   yet published. The workflow extracts it OUTSIDE the checkout; lib/unsigned.mjs reads only regular files
+//   with the catalogue's names and refuses anything else in the folder.
+// --live DIR: what scripts/live-index.mjs read through the GitHub API (index.json + index.json.minisig, or
+//   the marker NO-INDEX-RELEASE for a first publish). The next seq comes from there, never from a CDN, and a
+//   missing index is only a first publish when the marker says there is no `index` release at all.
+// --allow-unbuilt: a pending entry with no build is left out (and listed) instead of stopping the job. The
+//   workflow passes it only when the build job failed, which fails the run anyway.
 // The output folder gets, for each NEW package, <id>-<version>.pmmod, plus index.json, index.json.minisig
 // and plan.json; an existing file is never overwritten.
 
@@ -24,19 +32,35 @@ import crypto from "node:crypto";
 import { parseBlacklist, parseCatalogue } from "./lib/catalogue.mjs";
 import { pinnedPublicKeys } from "./lib/keys.mjs";
 import { loadSecretKey } from "./lib/minisign.mjs";
+import { NO_INDEX_MARKER } from "./lib/live.mjs";
 import { getPublic } from "./lib/net.mjs";
 import { checkKey, prepareRelease } from "./lib/pipeline.mjs";
-import {
-  INDEX_CAP,
-  INDEX_SIGNATURE_URL,
-  INDEX_URL,
-  packageAsset,
-  packageUrl,
-  SIGNATURE_CAP,
-} from "./lib/rules.mjs";
+import { INDEX_CAP, INDEX_FILE, INDEX_SIGNATURE_FILE, packageAsset, packageUrl, SIGNATURE_CAP } from "./lib/rules.mjs";
+import { readUnsignedDir, unsignedName } from "./lib/unsigned.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGE_CAP = 32 << 20;
+
+/**
+ * The pair scripts/live-index.mjs left in `dir`, or null for its first-publish marker. A folder with
+ * neither (the read step didn't run) or with half a pair is a refusal: it is never read as "no index".
+ */
+export function readLiveDir(dir) {
+  const at = (n) => join(dir, n);
+  const json = existsSync(at(INDEX_FILE));
+  const signature = existsSync(at(INDEX_SIGNATURE_FILE));
+  const marker = existsSync(at(NO_INDEX_MARKER));
+  if (json && signature && !marker) {
+    const read = (name, cap) => {
+      const bytes = readFileSync(at(name));
+      if (bytes.length > cap) fail(`${name} in ${dir} is larger than ${cap} bytes`);
+      return bytes;
+    };
+    return { json: read(INDEX_FILE, INDEX_CAP), signature: read(INDEX_SIGNATURE_FILE, SIGNATURE_CAP) };
+  }
+  if (marker && !json && !signature) return null;
+  fail(`${dir} holds neither the live index pair nor the first-publish marker (or both): run scripts/live-index.mjs first`);
+}
 
 /** A refusal of the job's own (bad input, wrong key); the CLI prints it and exits 1. */
 class SignError extends Error {}
@@ -70,29 +94,23 @@ export async function signMain(
   }
 
   const unsignedDir = arg(argv, "--unsigned");
+  const liveDir = arg(argv, "--live");
   const outDir = arg(argv, "--out");
-  if (!unsignedDir || !outDir) fail("--unsigned DIR and --out DIR are needed");
+  if (!unsignedDir || !liveDir || !outDir) fail("--unsigned DIR, --live DIR and --out DIR are needed");
   const catalogue = parseCatalogue(readFileSync(join(catalogueDir, "catalogue.json"), "utf8"));
   const blacklist = parseBlacklist(readFileSync(join(catalogueDir, "blacklist.json"), "utf8"));
 
+  const builds = readUnsignedDir(unsignedDir, catalogue, PACKAGE_CAP);
   const result = await prepareRelease({
     catalogue,
     blacklist,
     key,
     publicKeys,
     now,
-    readUnsigned: async (e) => {
-      const path = join(unsignedDir, `${e.id}-${e.version}.unsigned.pmmod`);
-      return existsSync(path) ? readFileSync(path) : null;
-    },
+    skipUnbuilt: argv.includes("--allow-unbuilt"),
+    readUnsigned: async (e) => builds.get(unsignedName(e)) ?? null,
     fetchPackage: (e) => get(packageUrl(e.id, e.version), PACKAGE_CAP),
-    fetchLiveIndex: async () => {
-      const json = await get(INDEX_URL, INDEX_CAP);
-      if (!json) return null;
-      const signature = await get(INDEX_SIGNATURE_URL, SIGNATURE_CAP);
-      if (!signature) throw new Error("index.json is published but index.json.minisig isn't");
-      return { json, signature };
-    },
+    fetchLiveIndex: async () => readLiveDir(liveDir),
   });
 
   mkdirSync(outDir, { recursive: true });
@@ -109,12 +127,16 @@ export async function signMain(
     expires: result.index.parsed.expires.toISOString(),
     indexSha256: createHash("sha256").update(result.index.bytes).digest("hex"),
     packages: result.packages.map((p) => ({ tag: p.tag, asset: packageAsset(p.entry.id, p.entry.version), fresh: p.fresh, sha256: p.sha256 })),
+    skipped: result.skipped.map((e) => `${e.id}-v${e.version}`),
   };
   write("plan.json", `${JSON.stringify(plan, null, 2)}\n`);
 
   const lines = [`index seq ${plan.seq}, expires ${plan.expires}`, ""];
   lines.push("| release | new | signed sha256 |", "| --- | --- | --- |");
   for (const p of plan.packages) lines.push(`| ${p.tag} | ${p.fresh ? "yes" : "no"} | \`${p.sha256}\` |`);
+  if (plan.skipped.length) {
+    lines.push("", `**Left out, not built (the build job failed): ${plan.skipped.join(", ")}.** They stay pending; the index offers what is signed.`);
+  }
   log(lines.join("\n"));
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${lines.join("\n")}\n`);
   return plan;

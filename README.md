@@ -26,15 +26,18 @@ Nothing else in this repo can sign, and the Personal-Manager repo holds no mod s
 | `scripts/lib/rules.mjs` | PM's rules in JavaScript: mod ids, version names and semver order, plain text, times, URLs, blacklist grammar. |
 | `scripts/lib/keys.mjs` | The two pinned Atlas public keys (main `95B83457064D517B`, rollover `993CE0152A3E4E8C`). |
 | `scripts/lib/pipeline.mjs` | The sign job as one function: next seq from the verified live index, sign pending packages, re-verify published ones, build and sign the index. |
-| `scripts/sign.mjs` | The one step that holds the secrets. `--key-check-only` decrypts the key, requires it to be the pinned main key, signs a probe and verifies it. |
+| `scripts/sign.mjs` | The one step that holds the secrets. `--key-check-only` decrypts the key, requires it to be the pinned main key, signs a probe and verifies it. Otherwise `--unsigned DIR --live DIR --out DIR [--allow-unbuilt]`. |
+| `scripts/live-index.mjs` + `scripts/lib/live.mjs` | The sign job's step before signing (token, no key): reads the live `index` release **through the GitHub API**, not the CDN, for the next seq. No release at all is a first publish; a release missing an asset is refused. |
+| `scripts/lib/unsigned.mjs` | Reads the build job's output: only regular files with the catalogue's names, opened without following links, within a size cap; anything else in the folder is a refusal. |
+| `scripts/lib/gh.mjs` | `gh` run with an argument list (no shell), shared by the publish step and the live-index read. |
 | `scripts/dry-run.mjs` | The same path with a throwaway key it makes itself (no secrets), for pull requests. |
 | `scripts/verify-published.mjs` | Reads the public URLs (or `--dir`) and verifies everything under the pinned keys; prints seq and expiry. |
 | `scripts/plan.mjs` | Plan job: which catalogue entries aren't published yet (a public GET of each release asset, the same test the sign job applies). |
 | `scripts/build-mod.sh` | Build job: builds one entry from the source repo at its pinned commit the way PM's `just build-mods` does, packs it, verifies it, prints its sha256 against the recorded one with a per-file table. |
-| `scripts/publish.mjs` | Sign job, after signing: creates the releases and replaces the `index` assets with `gh`. Never overwrites a package. |
+| `scripts/publish.mjs` | Sign job, after signing: creates the releases and replaces the `index` assets with `gh` (retried; first re-reads the live seq and refuses unless it is the one signed on top of). Never overwrites a package. |
 | `scripts/describe-package.mjs` | Lists the files of a `.pmmod` with sizes and sha256s: for finding the difference when a rebuild doesn't match. |
-| `scripts/check.mjs` + `scripts/lib/gates.mjs` | The repo gates the dry run runs: strict catalogue and blacklist, append-only catalogue, workflow security shape, action pins, no keys or packages tracked, SPDX headers. |
-| `.github/workflows/publish.yml` | Plan, build (no secrets), sign (environment `mod-signing`). |
+| `scripts/check.mjs` + `scripts/lib/gates.mjs` | The repo gates the dry run runs: strict catalogue and blacklist, append-only catalogue (an entry whose release was never published may be amended or removed), workflow security shape, action pins, no keys or packages tracked, SPDX headers. |
+| `.github/workflows/publish.yml` | Plan, build (no secrets), sign (environment `mod-signing`). Keeps the new index pair as the `signed-index` artifact before it replaces the live one. |
 | `.github/workflows/dry-run.yml` | Every pull request: tests, gates, rebuild of the entries it adds, throwaway-key signing rehearsal, zizmor. No secrets, no environment. |
 | `scripts/add-entry.mjs` | `node scripts/add-entry.mjs ID VERSION COMMIT SHA256` writes a catalogue entry from the manifest at that commit. |
 
@@ -46,12 +49,21 @@ deterministic, so removing a published package's signature entry gives back exac
 
 ```sh
 node --test "test/*.test.mjs"
-PM_CHECKOUT=/path/to/Personal-Manager node --test "test/*.test.mjs"   # also pins PM's constants and keys, and
-                                                                      # compares our zip writer with pack-mod's attach
+PM_CHECKOUT=/path/to/Personal-Manager node --test "test/*.test.mjs"   # also pins PM's constants, key table (ids,
+                                                                      # public keys AND roles) and compares our zip
+                                                                      # writer with pack-mod's attach
+TAURI_CLI=/path/to/node_modules/.bin/tauri node --test "test/*.test.mjs"   # also runs a live `tauri signer
+                                                                      # generate` / `sign` against lib/minisign.mjs
 ```
 
-`test/vectors/` holds PM's pinned index vector (copied from `index.rs`) and an index signed by a throwaway
-key that PM's own verifier accepted (public key only; no secret is ever committed).
+The dry run checks out PM's mod sources at a pinned commit (`dry-run.yml`, the `pm` checkout) and sets
+`PM_CHECKOUT`, so those tests never skip in CI; bump that commit when PM's mod format or keys change. Run the
+`TAURI_CLI` line whenever `lib/minisign.mjs` changes (the key layout is otherwise only proven by `sign.mjs
+--key-check-only` at publish time).
+
+`test/vectors/` holds PM's pinned index vector (copied from `index.rs`), an index signed by a throwaway key
+that PM's own verifier accepted, and a file and a package signed with a throwaway key that
+`tauri signer generate` made (public key and signatures only; no secret is ever committed).
 
 ## Cross-check with PM (how the format was proven against the real verifier)
 
@@ -70,7 +82,10 @@ Repeat this when PM's index or package format changes. The mirror in `rules.mjs`
 - The main key signs; the rollover key never goes into CI (`sign.mjs` refuses it). `revokedKeyIds` is `[]` in CI
   and a live index that carries a revocation is never replaced by it.
 - A published version is burned: an existing release asset is verified, never re-signed or replaced.
-- An index that exists but does not verify stops the job; seq is never reset to 1.
+- An index that exists but does not verify stops the job; seq is never reset to 1. The live index is read through
+  the GitHub API, and only a missing `index` **release** is a first publish: a release without `index.json` or its
+  signature is a torn replacement and is refused, never read as "nothing there".
+- The build job's output is extracted outside the checkout and read as plain files with known names only.
 - Never commit a key, a `.pmmod` or anything from `signed/` or `unsigned/` (`.gitignore` is not a boundary; the tree is public).
 
 ## The workflows
@@ -84,12 +99,14 @@ Repeat this when PM's index or package format changes. The mirror in `rules.mjs`
    the source repo at the entry's pinned commit into `src/`, runs `npm ci --ignore-scripts`, then
    `scripts/build-mod.sh`, and uploads the unsigned package. It shares no cache with the sign job.
 3. `sign` (environment `mod-signing`, `main` only, the **only** job with `contents: write`) runs no npm and nothing
-   from the source checkout. The one step that holds the two secrets, `scripts/sign.mjs`, recomputes everything
-   about each package (its sha256 must equal `unsignedSha256`; its structure, manifest and checksums are
+   from the source checkout. It first reads the live index through the API (`live-index.mjs`, token, no key). The
+   one step that holds the two secrets, `scripts/sign.mjs`, recomputes everything about each package (its sha256 must equal `unsignedSha256`; its structure, manifest and checksums are
    re-read), signs with the trusted comment PM expects, builds `index.json` with `seq` one above the live verified
-   index and `expires` 60 days out, and signs it. `publish.mjs` then creates the `<id>-v<version>` releases and
-   replaces the assets of the `index` release; `verify-published.mjs` reads the public URLs back under the pinned
-   keys and requires the live index to be the one just uploaded.
+   index and `expires` 60 days out, and signs it. The new pair is kept as the `signed-index` artifact (30 days),
+   then `publish.mjs` creates the `<id>-v<version>` releases and replaces the assets of the `index` release;
+   `verify-published.mjs` reads the public URLs back under the pinned keys and requires the live index to be the
+   one just uploaded. If some builds failed, the sign job still runs: it signs what is built, leaves the unbuilt
+   entries out (they stay pending) and the run stays red.
 
 A manual run with **key_check_only** decrypts the key, requires it to be the pinned main key, signs a probe and
 verifies it with the pinned public key, and uploads nothing.
@@ -110,9 +127,14 @@ One time, after this branch's PR is open:
    ```
 3. **Check the key before anything real.** Actions, Publish, Run workflow on `main`, tick `key_check_only`,
    approve the `mod-signing` run. Expect the log line `key OK 95B83457064D517B`. If it says the password is wrong,
-   the secret has to be set again: no trailing newline in `ATLAS_MOD_SIGNING_KEY_PASSWORD`, and the key secret is the
-   key file's one line of base64 (`tr -d '\n' < key | gh secret set ...`). Run this again after any change to
-   `.github/` or `scripts/`, and after merging a Dependabot bump of the action pins.
+   the secrets have to be set again. They are **environment** secrets of `mod-signing` (without `--env`, `gh` sets a
+   repository secret, and the environment's one of the same name still wins):
+   ```
+   tr -d '\n' < KEYFILE | gh secret set ATLAS_MOD_SIGNING_KEY -R itsAtlas-org/PM-Mods --env mod-signing
+   printf '%s' 'THE PASSWORD' | gh secret set ATLAS_MOD_SIGNING_KEY_PASSWORD -R itsAtlas-org/PM-Mods --env mod-signing
+   ```
+   The key secret is the key file's one line of base64; the password has no trailing newline. Run the check again
+   after any change to `.github/` or `scripts/`, and after merging a Dependabot bump of the action pins.
 
 Then, for each mod version (the first one is `atlas.map`):
 
@@ -133,7 +155,9 @@ Then, for each mod version (the first one is `atlas.map`):
 
 ## Running it afterwards
 
-- **Monthly.** The cron re-signs on the 1st. GitHub switches scheduled workflows off after 60 days without repo
+- **Monthly.** The cron re-signs on the 1st, and **every scheduled run waits for you to approve `mod-signing`**; a
+  deployment nobody approves fails after 30 days, and the index then runs on towards its expiry unrenewed. Approve it
+  the day it appears (a calendar reminder for the 1st). GitHub switches scheduled workflows off after 60 days without repo
   activity and an index lives 60 days, so put a monthly reminder in your calendar and, if the cron looks stale,
   run Publish by hand (Run workflow, key_check_only off). Two missed months and PM reports "safety list not
   checked since".
@@ -151,9 +175,42 @@ Then, for each mod version (the first one is `atlas.map`):
   the first file whose sha256 differs is the cause (a different Node or OS making different bundle bytes, a
   dependency that moved, a different commit). Fix the cause. Recording CI's sha256 instead is a last resort
   because it weakens the check from "CI reproduced what I built" to "I read what CI built"; that is your call.
+- **Key check runs don't queue behind publishes.** `key_check_only` has its own concurrency group; GitHub keeps one
+  pending run per group and would otherwise cancel a queued publish for it.
 - **Key trouble.** The rollover key never goes into CI and no rollover signer is built here. `revokedKeyIds` is
   always `[]` from CI, and a live index that carries a revocation is never replaced by it. Rotating or revoking is
   an offline job, to be written when it is needed.
+
+## A run failed
+
+Find the red job in the run first. Nothing here needs the signing key, and no step is ever "undone" by deleting a
+release or a tag.
+
+- **Build failed** (`MISMATCH`, a moved dependency, a commit that is no longer fetchable). The sign job still ran
+  and signed what was built: the index was renewed and the blacklist shipped, only the unbuilt entries are missing
+  (the run summary lists them). The entry stays pending, so the build fails on every run until it is fixed. If the
+  cause can be fixed (see "A mismatch"), re-run the failed jobs. If it cannot, **amend or remove the entry** in a
+  PR: the append-only gate lets an entry go or change when its release does not exist (a public 404 on its
+  asset), and refuses it for a published one. Record only commits that are on `main` to avoid the fetchable-commit case.
+- **Sign refused before publishing** (the live index doesn't verify, a build isn't what the catalogue recorded, the
+  key is wrong). Nothing was uploaded. Fix the cause and re-run the failed jobs (this re-reads the live index and
+  signs again; signing is deterministic, so a package comes out identical).
+- **Publish failed after signing.** Package releases are safe to repeat: "Re-run failed jobs" finds the ones that
+  exist, checks them byte for byte and adds the missing ones. If it failed while replacing the `index` assets the
+  live pair may be torn (a new `index.json` with the old signature, or one file missing): PM sees an invalid pair
+  and keeps what it had, and the next run refuses to publish over it (`the index release exists but ...`). Put the
+  pair back from the failed run, then check it:
+  ```
+  gh run download RUN_ID -R itsAtlas-org/PM-Mods -n signed-index -D recovered
+  gh release upload index recovered/index.json recovered/index.json.minisig -R itsAtlas-org/PM-Mods --clobber
+  node scripts/verify-published.mjs --plan recovered/plan.json
+  ```
+  `RUN_ID` is the number in the failed run's URL. The artifact is kept for 30 days and holds no secret. This also
+  covers a first publish that tore (the `index` release exists with no assets): the release must stay, upload into it.
+- **The read-back failed but the upload worked.** A cache can serve the previous pair for a few minutes. Run
+  `node scripts/verify-published.mjs` by hand; if it reports the new seq the publish is done (re-running the
+  failed job would publish one seq higher, which is harmless).
+- **Another publish got in first** (`another publish got there first`). Nothing was replaced; run Publish again.
 
 ## Never
 

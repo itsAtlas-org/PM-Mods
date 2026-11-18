@@ -152,6 +152,37 @@ test("a tampered published package stops the job; so does a catalogue/build mism
   await assert.rejects(w3.run(), /no build of it to sign/);
 });
 
+test("skipUnbuilt: an entry that can't be built is left out, and the rest of the index still ships", async () => {
+  const w = world();
+  w.add();
+  w.publish(await w.run());
+  const broken = w.add({ version: "1.2.0" });
+  w.builds.delete(releaseTag(broken.id, broken.version));
+  const pin = w.add({ id: "atlas.pin", name: "Pin" });
+  // The default stays strict: a pending entry without a build stops the job.
+  await assert.rejects(w.run(), /no build of it to sign/);
+  const r = await w.run({ skipUnbuilt: true });
+  assert.deepEqual(r.skipped.map((e) => `${e.id}@${e.version}`), ["atlas.map@1.2.0"]);
+  assert.deepEqual(r.packages.map((p) => `${p.tag}:${p.fresh}`), ["atlas.map-v1.1.0:false", "atlas.pin-v1.1.0:true"]);
+  // The index offers the highest version that exists, not the unbuilt one, and it renews (seq 2).
+  assert.deepEqual(r.index.parsed.mods.map((m) => `${m.id}@${m.version}`), ["atlas.map@1.1.0", "atlas.pin@1.1.0"]);
+  assert.equal(r.seq, 2);
+  assert.equal(pin.id, "atlas.pin");
+  // A build that exists but isn't what the catalogue recorded is still a refusal, flag or not.
+  w.builds.set(releaseTag(pin.id, pin.version), unsignedPackage({ manifest: manifestOf({ id: "atlas.pin", name: "Pin" }), files: { "NOTICE.txt": "different\n" } }));
+  await assert.rejects(w.run({ skipUnbuilt: true }), /catalogue records/);
+});
+
+test("skipUnbuilt with nothing published or built has nothing to index", async () => {
+  const w = world();
+  const e = w.add();
+  w.builds.delete(releaseTag(e.id, e.version));
+  await assert.rejects(w.run({ skipUnbuilt: true }), /nothing to put in an index/);
+  // An empty catalogue is still an (empty) index, as before.
+  const empty = world();
+  assert.equal((await empty.run({ skipUnbuilt: true })).index.parsed.mods.length, 0);
+});
+
 test("the signing key must be the pinned MAIN key", () => {
   const { main, rollover, publicKeys } = ephemeralRing();
   assert.equal(assertMainKey(main.key, publicKeys).id, main.pub.id);

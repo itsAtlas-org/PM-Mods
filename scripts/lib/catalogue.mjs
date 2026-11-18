@@ -151,17 +151,34 @@ export function serializeBlacklist(entries) {
   return `${JSON.stringify({ format: 1, entries }, null, 2)}\n`;
 }
 
-/** The entries added by `current` over `base` (both parsed), refusing any change or removal. */
-export function appendedEntries(base, current) {
-  const key = (e) => JSON.stringify(canonicalEntry(e));
-  const kept = new Map(current.map((e) => [releaseTag(e.id, e.version), key(e)]));
-  for (const e of base) {
+const entryKey = (e) => JSON.stringify(canonicalEntry(e));
+
+/** The entries of `base` that `current` drops or alters (compared as the canonical entry). */
+export function changedOrRemoved(base, current) {
+  const kept = new Map(current.map((e) => [releaseTag(e.id, e.version), entryKey(e)]));
+  return base.filter((e) => kept.get(releaseTag(e.id, e.version)) !== entryKey(e));
+}
+
+/**
+ * The entries `current` asks to be built over `base` (both parsed): the ones it adds, plus the ones it
+ * amends. Entries are append-only history of what was SIGNED, so changing or removing an existing entry is
+ * refused, with one exception: a release that was never published has no history to protect, and an entry
+ * that can't be built or signed would otherwise sit pending forever (the publish run is red every time).
+ * `unpublished` is the set of release tags the caller has confirmed are not on the public releases (a GET
+ * of the asset URL answered 404); it is empty by default, so nothing is editable unless the caller says so.
+ */
+export function appendedEntries(base, current, { unpublished = new Set() } = {}) {
+  const amended = new Set();
+  for (const e of changedOrRemoved(base, current)) {
     const tag = releaseTag(e.id, e.version);
-    if (!kept.has(tag)) refuse(`catalogue.json: ${tag} was removed; entries are append-only history`);
-    if (kept.get(tag) !== key(e)) refuse(`catalogue.json: ${tag} was changed; entries are append-only history`);
+    const now = current.find((c) => releaseTag(c.id, c.version) === tag);
+    if (!unpublished.has(tag)) {
+      refuse(`catalogue.json: ${tag} was ${now ? "changed" : "removed"}; entries are append-only history`);
+    }
+    if (now) amended.add(tag);
   }
   const had = new Set(base.map((e) => releaseTag(e.id, e.version)));
-  return current.filter((e) => !had.has(releaseTag(e.id, e.version)));
+  return current.filter((e) => !had.has(releaseTag(e.id, e.version)) || amended.has(releaseTag(e.id, e.version)));
 }
 
 /** Per id, the entry with the highest version (what the index lists). */

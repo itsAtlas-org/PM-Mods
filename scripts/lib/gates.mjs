@@ -9,7 +9,8 @@
 //  - no pull_request_target; the dry run is `pull_request` only, with no secret and no environment;
 //  - the two secrets appear only in the ONE step of the sign job, which is the only job with an
 //    environment and the only one that may write;
-//  - the sign job runs no npm and uses only checkout and download-artifact, and never checks out another repo;
+//  - the sign job runs no npm and uses only checkout, download-artifact and upload-artifact, never checks out
+//    another repo, and extracts the build artifacts outside the checkout (under ${{ runner.temp }});
 //  - the top-level permissions are {} and every job states its own;
 //  - no `${{ }}` inside a `run:` (untrusted input goes through env);
 //  - every checkout sets persist-credentials: false; no `-latest` runner.
@@ -147,11 +148,28 @@ export function workflowProblems(file, text) {
   // The sign job holds the key: no package manager, no other repo's code, only the two actions it needs.
   for (const r of live.filter((x) => x.job === SIGN_JOB && file === "publish.yml")) {
     const u = r.body.match(/^(?:- )?uses:\s*(\S+)/)?.[1];
-    if (u && !/^actions\/(checkout|download-artifact)@/.test(u)) bad(r.n, `the sign job may use only actions/checkout and actions/download-artifact, not ${u}`);
+    if (u && !/^actions\/(checkout|download-artifact|upload-artifact)@/.test(u)) {
+      bad(r.n, `the sign job may use only actions/checkout, actions/download-artifact and actions/upload-artifact, not ${u}`);
+    }
     if (r.body.startsWith("repository:") || r.body.startsWith("path: src") || r.body.startsWith("path: tools")) bad(r.n, "the sign job checks out this repo only");
   }
   for (const l of runLines(rows).filter((x) => x.job === SIGN_JOB && file === "publish.yml")) {
     if (/\b(npm|npx|pnpm|yarn|pip|corepack|vite)\b|(^|[\s/])(src|tools)\//.test(l.text)) bad(l.n, "the sign job runs no npm and nothing from the source checkout");
+  }
+
+  // The build artifacts are extracted outside the checkout, so they never sit beside the scripts that run
+  // with the key. Every download-artifact of the sign job must say where, and say $RUNNER_TEMP.
+  if (file === "publish.yml") {
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].job !== SIGN_JOB || !/^(?:- )?uses:\s*actions\/download-artifact@/.test(rows[i].body)) continue;
+      const itemIndent = rows[i].body.startsWith("- ") ? rows[i].indent : rows[i].indent - 2;
+      let path = null;
+      for (let j = i + 1; j < rows.length && (rows[j].blank || rows[j].indent > itemIndent); j++) {
+        const m = stripComment(rows[j].body).trim().match(/^path:\s*(.*)$/);
+        if (m) path = m[1];
+      }
+      if (!path || !path.startsWith("${{ runner.temp }}/")) bad(rows[i].n, "the sign job's download-artifact must extract under ${{ runner.temp }}/, outside the checkout");
+    }
   }
 
   // Every checkout drops the credentials.
@@ -179,7 +197,7 @@ export function trackedFileProblems(files) {
     else if (/\.minisig$/.test(base) && !f.startsWith("test/vectors/")) problems.push(`${f}: signatures are made by the pipeline, not committed (test vectors excepted)`);
     else if (/^(package\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml)$/.test(base) || f.split("/").includes("node_modules")) {
       problems.push(`${f}: this repo has no dependencies and no package manager`);
-    } else if (/^(signed|unsigned|out)\//.test(f)) problems.push(`${f}: build output is never committed`);
+    } else if (/^(signed|unsigned|out|recovered)\//.test(f)) problems.push(`${f}: build output is never committed`);
   }
   return problems;
 }

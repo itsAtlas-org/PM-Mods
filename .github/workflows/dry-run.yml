@@ -34,7 +34,21 @@ jobs:
           # Full history, so the base commit is there for the append-only check.
           fetch-depth: 0
           persist-credentials: false
+      # PM's own mod sources at a pinned commit, so the tests that hold this repo's constants, key table (ids,
+      # public keys AND roles) and zip writer to PM's skip nothing. Bump the commit when PM's mod format or
+      # keys change; a red test here is the drift signal.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: itsAtlas-org/Personal-Manager
+          ref: d0de377a5e1286898afcd901a8e20f074d6e5578
+          path: pm
+          sparse-checkout: |
+            scripts
+            src-tauri/src/mods
+          persist-credentials: false
       - name: Unit tests
+        env:
+          PM_CHECKOUT: ${{ github.workspace }}/pm
         run: node --test test/*.test.mjs
       - name: Repo gates, and the catalogue entries this PR adds
         id: gates

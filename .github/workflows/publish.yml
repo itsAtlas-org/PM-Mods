@@ -10,13 +10,20 @@ name: Publish
 #                             commit, one matrix job per entry, and uploads the unsigned package
 #   sign   (environment mod-signing: Bobby approves, main only; the ONLY job with contents: write and the
 #                             ONLY job that sees the two secrets, in ONE step)
-#                             recomputes everything about the build output (sha256 against the catalogue,
-#                             structure, manifest), signs, uploads, rebuilds and signs index.json, replaces
-#                             the assets on release "index", then reads the public URLs back.
+#                             reads the live index through the API, recomputes everything about the build
+#                             output (sha256 against the catalogue, structure, manifest), signs, keeps the
+#                             new index pair as an artifact, uploads, rebuilds and signs index.json,
+#                             replaces the assets on release "index", then reads the public URLs back.
 #
 # The sign job runs no npm and nothing from the Personal-Manager checkout: it uses this repo's
 # zero-dependency scripts, the runner's own node and gh. A change to scripts/ or to this file on main runs
-# with the key, so review of those diffs is the control.
+# with the key, so review of those diffs is the control. The build artifacts are extracted OUTSIDE the
+# checkout ($RUNNER_TEMP/unsigned), so they can never sit next to the scripts that hold the key, and
+# sign.mjs reads only regular files with the catalogue's names from there.
+#
+# The sign job also runs when some builds FAILED (the run is red regardless): it then signs what is built
+# and leaves the unbuilt entries out, so one entry that can't be built never stops the monthly renewal
+# of the index or an emergency blacklist. What to do after a red run: README, "A run failed".
 #
 # Triggers: a push to main that changes the catalogue or the blacklist; the monthly re-sign (the index
 # expires after 60 days); and a manual run. A manual run with key_check_only decrypts the key, checks it is
@@ -42,10 +49,11 @@ on:
 
 permissions: {}
 
-# One publish at a time, and a started one is never cancelled: a half-finished publish is finished by the
-# next run (every step is idempotent), but two at once could race on the index seq.
+# One publish at a time, and a started one is never cancelled (two at once could race on the index seq).
+# GitHub keeps one PENDING run per group and cancels an older pending one for a newer, so a key check
+# (which publishes nothing) has its own group: it must not push a queued publish out of the line.
 concurrency:
-  group: publish
+  group: publish${{ inputs.key_check_only && '-keycheck' || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -111,11 +119,12 @@ jobs:
   sign:
     name: Sign and publish
     needs: [plan, build]
-    # build is skipped when nothing is pending; it must not have failed. An empty catalogue has nothing to
-    # publish, so only the key check runs then.
+    # build is skipped when nothing is pending, and may have FAILED for some entries: the sign step then
+    # leaves those out (--allow-unbuilt) and the run stays red. An empty catalogue has nothing to publish,
+    # so only the key check runs then.
     if: >-
       ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.plan.result == 'success'
-      && (needs.build.result == 'success' || needs.build.result == 'skipped')
+      && (needs.build.result == 'success' || needs.build.result == 'skipped' || needs.build.result == 'failure')
       && (inputs.key_check_only || needs.plan.outputs.empty != 'true') }}
     runs-on: ubuntu-24.04
     environment: mod-signing
@@ -125,27 +134,50 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Outside the checkout: whatever a build job puts in these artifacts can't land next to scripts/.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        if: ${{ needs.build.result == 'success' }}
+        if: ${{ !inputs.key_check_only && needs.build.result != 'skipped' }}
+        # When every build failed there is nothing to download, and that must not stop the sign job.
+        continue-on-error: ${{ needs.build.result == 'failure' }}
         with:
           pattern: unsigned-*
           merge-multiple: true
-          path: unsigned
+          path: ${{ runner.temp }}/unsigned
       - name: Versions
         run: node --version && gh --version
+      # Reads the live index pair through the API (not the CDN) for the next seq. Has the token, no key.
+      - name: Read the live index
+        if: ${{ !inputs.key_check_only }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/live-index.mjs "$RUNNER_TEMP/live"
       # The only step with the secrets. It reads the public release URLs and writes ./signed; it uploads nothing.
       - name: Sign with the mod-signing key
         env:
           ATLAS_MOD_SIGNING_KEY: ${{ secrets.ATLAS_MOD_SIGNING_KEY }}
           ATLAS_MOD_SIGNING_KEY_PASSWORD: ${{ secrets.ATLAS_MOD_SIGNING_KEY_PASSWORD }}
           KEY_CHECK_ONLY: ${{ inputs.key_check_only }}
+          BUILD_RESULT: ${{ needs.build.result }}
         run: |
           if [ "$KEY_CHECK_ONLY" = "true" ]; then
             node scripts/sign.mjs --key-check-only
+          elif [ "$BUILD_RESULT" = "failure" ]; then
+            node scripts/sign.mjs --unsigned "$RUNNER_TEMP/unsigned" --live "$RUNNER_TEMP/live" --out signed --allow-unbuilt
           else
-            mkdir -p unsigned
-            node scripts/sign.mjs --unsigned unsigned --out signed
+            node scripts/sign.mjs --unsigned "$RUNNER_TEMP/unsigned" --live "$RUNNER_TEMP/live" --out signed
           fi
+      # The pair about to replace the live one, kept BEFORE the replacement: replacing the two assets is not
+      # atomic, and if it tears this is how the pair is put back (README, "A run failed"). No secret in it.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !inputs.key_check_only }}
+        with:
+          name: signed-index
+          path: |
+            signed/index.json
+            signed/index.json.minisig
+            signed/plan.json
+          retention-days: 30
+          if-no-files-found: error
       - name: Create the releases and replace the index
         if: ${{ !inputs.key_check_only }}
         env:

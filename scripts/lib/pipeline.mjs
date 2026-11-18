@@ -50,6 +50,10 @@ export function checkKey(key, publicKeys) {
  * @param {Date} p.now
  * @param {object} p.key a loaded secret key (minisign.loadSecretKey)
  * @param {object[]} p.publicKeys the pinned keys, each with `role`
+ * @param {boolean} [p.skipUnbuilt] leave out a pending entry that has no build (instead of refusing), so one
+ *   entry that can't be built doesn't stop the index's monthly renewal or an emergency blacklist. Set only
+ *   when the build job is already red (the run fails loudly regardless); the entry stays pending and
+ *   `skipped` lists it. A build that exists but doesn't match the catalogue is still a refusal.
  */
 export async function prepareRelease({
   catalogue,
@@ -60,11 +64,13 @@ export async function prepareRelease({
   now,
   key,
   publicKeys,
+  skipUnbuilt = false,
 }) {
   assertMainKey(key, publicKeys);
 
   // Packages: a published version is re-verified and never re-signed; a pending one is signed fresh.
   const packages = [];
+  const skipped = [];
   for (const entry of catalogue) {
     const tag = releaseTag(entry.id, entry.version);
     const published = await fetchPackage(entry);
@@ -74,7 +80,11 @@ export async function prepareRelease({
       continue;
     }
     const unsigned = await readUnsigned(entry);
-    if (!unsigned) refuse(`${tag} isn't published and there is no build of it to sign`);
+    if (!unsigned) {
+      if (!skipUnbuilt) refuse(`${tag} isn't published and there is no build of it to sign`);
+      skipped.push(entry);
+      continue;
+    }
     const signed = signPackage(unsigned, entry, key, publicKeys);
     packages.push({ entry, tag, bytes: signed.bytes, sha256: signed.sha256, facts: signed.facts, fresh: true });
   }
@@ -97,8 +107,10 @@ export async function prepareRelease({
   }
   if (seq > MAX_SEQ) refuse("the index seq would pass 2^53 - 1");
 
+  // The index offers the highest version of each id among what is signed or already published.
+  if (packages.length === 0 && skipped.length > 0) refuse("no catalogue entry is published or built, so there is nothing to put in an index");
   const bySha = new Map(packages.map((p) => [p.tag, p]));
-  const mods = latestPerId(catalogue).map((entry) => {
+  const mods = latestPerId(packages.map((p) => p.entry)).map((entry) => {
     const p = bySha.get(releaseTag(entry.id, entry.version));
     return indexEntryFor(p.facts, p.sha256);
   });
@@ -111,5 +123,6 @@ export async function prepareRelease({
     packages,
     index: { bytes: built.bytes, signature, comment: built.comment, parsed: built.parsed },
     seq,
+    skipped,
   };
 }
