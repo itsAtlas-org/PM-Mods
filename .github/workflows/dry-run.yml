@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: 2026 Bobby Yu
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+name: Dry run
+
+# What every pull request gets: the tests, the repo gates, a rebuild of each catalogue entry the PR adds
+# (compared with the sha256 the PR records), and a signing rehearsal under a throwaway key made inside
+# the job. Nothing here can sign for real: this is `pull_request`, never `pull_request_target`, the job
+# has no environment, and no secret is referenced (check.mjs enforces all three). The token is read-only.
+#
+# Actions are pinned to full commit SHAs (the repo gate enforces it); the trailing "# vX.Y.Z" is the
+# version Dependabot reads.
+
+on:
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: dry-run-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Tests and gates
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      added: ${{ steps.gates.outputs.added }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history, so the base commit is there for the append-only check.
+          fetch-depth: 0
+          persist-credentials: false
+      # PM's own mod sources at a pinned commit, so the tests that hold this repo's constants, key table (ids,
+      # public keys AND roles) and zip writer to PM's skip nothing. Bump the commit when PM's mod format or
+      # keys change; a red test here is the drift signal.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: itsAtlas-org/Personal-Manager
+          ref: d0de377a5e1286898afcd901a8e20f074d6e5578
+          path: pm
+          sparse-checkout: |
+            scripts
+            src-tauri/src/mods
+          persist-credentials: false
+      - name: Unit tests
+        env:
+          PM_CHECKOUT: ${{ github.workspace }}/pm
+        run: node --test test/*.test.mjs
+      - name: Repo gates, and the catalogue entries this PR adds
+        id: gates
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: node scripts/check.mjs --base "$BASE_SHA"
+      - name: Index with the real blacklist builds and verifies
+        run: |
+          mkdir -p none
+          node scripts/dry-run.mjs --unsigned none
+
+  rebuild:
+    name: Rebuild ${{ matrix.id }} ${{ matrix.version }}
+    needs: check
+    if: ${{ needs.check.outputs.added != '[]' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.check.outputs.added) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: tools
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ matrix.repo }}
+          ref: ${{ matrix.commit }}
+          path: src
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Build and pack the pinned commit; the sha256 must match the recorded one
+        env:
+          MOD_ID: ${{ matrix.id }}
+          MOD_VERSION: ${{ matrix.version }}
+          MOD_PATH: ${{ matrix.path }}
+          MOD_COMMIT: ${{ matrix.commit }}
+          MOD_SHA256: ${{ matrix.unsignedSha256 }}
+        run: sh tools/scripts/build-mod.sh
+      - name: Sign under a throwaway key, build the index, read it all back
+        working-directory: tools
+        run: node scripts/dry-run.mjs --unsigned ../out
+
+  zizmor:
+    name: Workflow audit
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install zizmor
+        run: pip install zizmor==1.26.1
+      - name: Audit workflows
+        # GH_TOKEN lets zizmor's online audits run without hitting rate limits; the token is read-only.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor .github/workflows
