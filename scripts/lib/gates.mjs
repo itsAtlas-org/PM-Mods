@@ -187,8 +187,11 @@ export function workflowProblems(file, text) {
       if (first(TIP_STEP) > first(SIGN_STEP)) bad(tip[0].n, `the step "${TIP_STEP}" must come before "${SIGN_STEP}"`);
       if (tip.some((r) => /^(if|continue-on-error):/.test(r.body))) bad(tip[0].n, `the step "${TIP_STEP}" must be unconditional and must not continue on error`);
       const text = tip.map((r) => r.body).join("\n");
-      if (!text.includes("git/ref/heads/main") || !/RUN_SHA:\s*\$\{\{ github\.sha \}\}/.test(text) || !/"\$tip" != "\$RUN_SHA"/.test(text)) {
+      if (!/RUN_SHA:\s*\$\{\{ github\.sha \}\}/.test(text) || !/^\s*tip=\$\(gh api "repos\/\$GITHUB_REPOSITORY\/git\/ref\/heads\/main" --jq \.object\.sha\)\s*$/m.test(text) || !/"\$tip" != "\$RUN_SHA"/.test(text)) {
         bad(tip[0].n, `the step "${TIP_STEP}" must compare github.sha with the live tip from git/ref/heads/main`);
+      } else if (!/^\s*if \[ "\$tip" != "\$RUN_SHA" \]; then\s*\n(?:(?!\s*fi\s*$).*\n)*?\s*exit 1\s*\n\s*fi\s*$/m.test(text)) {
+        // The comparison alone is a no-op: the branch must end the step with a failure (exit 1 right before fi).
+        bad(tip[0].n, `the step "${TIP_STEP}" must fail (exit 1) when the tip differs from github.sha`);
       }
     }
     // The signed-index upload must overwrite, or a re-run of the failed jobs stops before publish.mjs.

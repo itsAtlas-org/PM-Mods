@@ -149,7 +149,8 @@ Then, for each mod version (the first one is `atlas.map`):
 7. The merge starts Publish. Open the run, check the plan and the build's MATCH line, and **approve the
    `mod-signing` deployment**. The summary shows the release, the signed sha256 and the index seq and expiry.
    If the new run sits at "Pending" and never starts, an **older Publish run is waiting for approval** (most
-   likely the monthly one) and holds the queue: open it in Actions and approve or reject it first.
+   likely the monthly one) and holds the queue: open it in Actions and **reject** it (approving it fails the tip
+   check by design, see "Only main's tip signs"); the new run then starts.
 8. Check it independently from your own machine (no secrets needed):
    `node scripts/verify-published.mjs`. It prints the **seq**.
 9. PM side: raise `MIN_INDEX_SEQ` to the printed seq in the PM release that ships the mods (never above it), and
@@ -160,15 +161,19 @@ Then, for each mod version (the first one is `atlas.map`):
 - **Monthly.** The cron re-signs on the 1st, and **every scheduled run waits for you to approve `mod-signing`**; a
   deployment nobody approves fails after 30 days, and the index then runs on towards its expiry unrenewed. Approve it
   the day it appears (a calendar reminder for the 1st). Publishes run one at a time, so a forgotten waiting run
-  also keeps every later Publish (a catalogue or blacklist merge) at "Pending" with no message: approve or reject
-  the older run first. GitHub switches scheduled workflows off after 60 days without repo
+  also keeps every later Publish (a catalogue or blacklist merge) at "Pending" with no message: **reject** the
+  older run (approving it fails the tip check below, by design, and renews nothing); the pending newer run then
+  starts by itself. GitHub switches scheduled workflows off after 60 days without repo
   activity and an index lives 60 days, so put a monthly reminder in your calendar and, if the cron looks stale,
   run Publish by hand (Run workflow, key_check_only off). Two missed months and PM reports "safety list not
   checked since".
 - **Only main's tip signs.** The sign job fails, before the key is touched, when its run is not for the
   current tip of `main`. So "Re-run jobs" on an old run, or an old run that was waiting while a newer commit
   merged, signs nothing (it would otherwise sign the old catalogue and blacklist and roll an emergency
-  revocation back). When it says "main is now at ...", run Publish again from main; do not re-run the old one.
+  revocation back). When it says "main is now at ...", run Publish again from main (Actions, Publish, Run
+  workflow); do not re-run the old one. Nothing follows it by itself unless the newer commit changed
+  `catalogue.json` or `blacklist.json`: after any other merge (a README fix, a bump) an approved monthly run or a
+  waiting emergency blacklist fails this check and stays unpublished until you dispatch Publish.
 - **Emergency blacklist.** Edit `blacklist.json` (`{"format":1,"entries":[...]}`, the index's blacklist shape: either
   `id` + `versions` or `sha256`, then `action` `paused` or `removed`, and a one-line `reason`), open a PR, merge
   it, approve the run. The dry run builds an index with it first, so a malformed entry fails the PR instead of

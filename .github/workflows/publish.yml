@@ -155,7 +155,8 @@ jobs:
       # rule) say nothing about the commit, so "Re-run jobs" on an old run, or an old run that was waiting for
       # approval while a newer commit merged, would sign that old commit's scripts, catalogue and blacklist
       # and replace the live index with them: a rolled-back emergency blacklist. Runs for key checks too.
-      # Token only, no secret; if main moved on after this check, the newer commit's own run follows.
+      # Token only, no secret. A newer commit that changes the catalogue or the blacklist starts its own run;
+      # any other commit (README, scripts, workflows) starts none, so after "main is now at ..." run Publish by hand.
       - name: Refuse a commit that is not the tip of main
         env:
           GH_TOKEN: ${{ github.token }}
@@ -163,7 +164,7 @@ jobs:
         run: |
           tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
           if [ "$tip" != "$RUN_SHA" ]; then
-            echo "::error::This run is for $RUN_SHA but main is now at $tip. Nothing was signed. Run Publish again from main (Actions, Publish, Run workflow); do not re-run this one."
+            echo "::error::This run is for $RUN_SHA but main is now at $tip. Nothing was signed and nothing was published. Do this now: Actions, Publish, Run workflow, branch main (key_check_only off). Do not re-run this run. Until you do, the live index (and any catalogue or blacklist change waiting in it) is not renewed."
             exit 1
           fi
       # The only step with the secrets. It reads the public release URLs and writes ./signed; it uploads nothing.
