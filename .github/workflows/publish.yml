@@ -151,6 +151,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/live-index.mjs "$RUNNER_TEMP/live"
+      # The key signs main's TIP and nothing older. The ref-name guards (github.ref, the environment's main-only
+      # rule) say nothing about the commit, so "Re-run jobs" on an old run, or an old run that was waiting for
+      # approval while a newer commit merged, would sign that old commit's scripts, catalogue and blacklist
+      # and replace the live index with them: a rolled-back emergency blacklist. Runs for key checks too.
+      # Token only, no secret; if main moved on after this check, the newer commit's own run follows.
+      - name: Refuse a commit that is not the tip of main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_SHA: ${{ github.sha }}
+        run: |
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$tip" != "$RUN_SHA" ]; then
+            echo "::error::This run is for $RUN_SHA but main is now at $tip. Nothing was signed. Run Publish again from main (Actions, Publish, Run workflow); do not re-run this one."
+            exit 1
+          fi
       # The only step with the secrets. It reads the public release URLs and writes ./signed; it uploads nothing.
       - name: Sign with the mod-signing key
         env:
@@ -168,10 +183,16 @@ jobs:
           fi
       # The pair about to replace the live one, kept BEFORE the replacement: replacing the two assets is not
       # atomic, and if it tears this is how the pair is put back (README, "A run failed"). No secret in it.
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      # overwrite: true, because a re-run of the failed jobs is the documented recovery and artifacts belong to
+      # the RUN, not the attempt: without it the second attempt's upload fails and publish.mjs never runs. A
+      # torn live index makes sign refuse before this step, so the earlier attempt's pair is never overwritten
+      # while it is the one to restore.
+      - name: Keep the signed index pair
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !inputs.key_check_only }}
         with:
           name: signed-index
+          overwrite: true
           path: |
             signed/index.json
             signed/index.json.minisig

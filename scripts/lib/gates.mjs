@@ -13,6 +13,9 @@
 //    another repo, and extracts the build artifacts outside the checkout (under ${{ runner.temp }});
 //  - the top-level permissions are {} and every job states its own;
 //  - no `${{ }}` inside a `run:` (untrusted input goes through env);
+//  - the sign job refuses a commit that is not main's tip, in a step before the key is touched (a re-run of
+//    an old run must not sign old scripts, catalogue or blacklist), and its signed-index upload overwrites
+//    (a re-run of the failed jobs is the documented recovery);
 //  - every checkout sets persist-credentials: false; no `-latest` runner.
 //
 // The workflow reader is a line scanner, not a YAML parser: it knows the two-space layout these files use,
@@ -20,6 +23,8 @@
 
 const SHA40 = /^[0-9a-f]{40}$/;
 const SIGN_STEP = "Sign with the mod-signing key";
+const TIP_STEP = "Refuse a commit that is not the tip of main";
+const KEEP_STEP = "Keep the signed index pair";
 const SIGN_JOB = "sign";
 const WORKFLOW_TRIGGERS = {
   "publish.yml": ["push", "schedule", "workflow_dispatch"],
@@ -169,6 +174,32 @@ export function workflowProblems(file, text) {
         if (m) path = m[1];
       }
       if (!path || !path.startsWith("${{ runner.temp }}/")) bad(rows[i].n, "the sign job's download-artifact must extract under ${{ runner.temp }}/, outside the checkout");
+    }
+  }
+
+  if (file === "publish.yml") {
+    // Before the key is used, the run must be for main's tip. No `if:` (key checks too), no continue-on-error.
+    const signRows = live.filter((r) => r.job === SIGN_JOB);
+    const first = (name) => signRows.findIndex((r) => r.step === name);
+    const tip = signRows.filter((r) => r.step === TIP_STEP);
+    if (tip.length === 0) bad(1, `the sign job must have the step "${TIP_STEP}" (it fails when GITHUB_SHA is not main's tip)`);
+    else {
+      if (first(TIP_STEP) > first(SIGN_STEP)) bad(tip[0].n, `the step "${TIP_STEP}" must come before "${SIGN_STEP}"`);
+      if (tip.some((r) => /^(if|continue-on-error):/.test(r.body))) bad(tip[0].n, `the step "${TIP_STEP}" must be unconditional and must not continue on error`);
+      const text = tip.map((r) => r.body).join("\n");
+      if (!text.includes("git/ref/heads/main") || !/RUN_SHA:\s*\$\{\{ github\.sha \}\}/.test(text) || !/"\$tip" != "\$RUN_SHA"/.test(text)) {
+        bad(tip[0].n, `the step "${TIP_STEP}" must compare github.sha with the live tip from git/ref/heads/main`);
+      }
+    }
+    // The signed-index upload must overwrite, or a re-run of the failed jobs stops before publish.mjs.
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].job !== SIGN_JOB || !/^(?:- )?uses:\s*actions\/upload-artifact@/.test(rows[i].body)) continue;
+      const itemIndent = rows[i].body.startsWith("- ") ? rows[i].indent : rows[i].indent - 2;
+      let overwrite = false;
+      for (let j = i + 1; j < rows.length && (rows[j].blank || rows[j].indent > itemIndent); j++) if (stripComment(rows[j].body).trim() === "overwrite: true") overwrite = true;
+      for (let j = i - 1; j >= 0 && !overwrite && !rows[j].blank && rows[j].indent > itemIndent && !rows[j].body.startsWith("- "); j--) if (stripComment(rows[j].body).trim() === "overwrite: true") overwrite = true;
+      if (!overwrite) bad(rows[i].n, "the sign job's upload-artifact must set overwrite: true (a re-run of the failed jobs would fail there)");
+      if (rows[i].step !== KEEP_STEP) bad(rows[i].n, `the sign job's upload-artifact step must be named "${KEEP_STEP}"`);
     }
   }
 

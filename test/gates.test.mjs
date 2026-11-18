@@ -72,12 +72,26 @@ const cases = [
   ["setup-node in the sign job", "publish.yml", publish, SIGN_USES, `${SIGN_USES}\n      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0`, /may use only/],
   ["a repository checkout in the sign job", "publish.yml", publish, "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n      # Outside the checkout", "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          repository: acme/other\n          persist-credentials: false\n      # Outside the checkout", /this repo only/],
   ["a checkout that keeps its credentials", "dry-run.yml", dryRun, "          fetch-depth: 0\n          persist-credentials: false", "          fetch-depth: 0", /persist-credentials/],
+  ["a sign job with no main-tip check", "publish.yml", publish, "      - name: Refuse a commit that is not the tip of main\n", "      - name: Something else\n", /must have the step "Refuse a commit/],
+  ["a main-tip check that never compares", "publish.yml", publish, '          if [ "$tip" != "$RUN_SHA" ]; then', '          if [ "$tip" = "" ]; then', /must compare github\.sha/],
+  ["a main-tip check against another ref", "publish.yml", publish, "git/ref/heads/main", "git/ref/heads/dev", /must compare github\.sha/],
+  ["a main-tip check that is conditional", "publish.yml", publish, "      - name: Refuse a commit that is not the tip of main\n", "      - name: Refuse a commit that is not the tip of main\n        if: ${{ !inputs.key_check_only }}\n", /unconditional/],
+  ["a main-tip check that may fail quietly", "publish.yml", publish, "      - name: Refuse a commit that is not the tip of main\n", "      - name: Refuse a commit that is not the tip of main\n        continue-on-error: true\n", /unconditional/],
+  ["the signed-index upload without overwrite", "publish.yml", publish, "          overwrite: true\n", "", /must set overwrite: true/],
+  ["an unnamed upload in the sign job", "publish.yml", publish, "      - name: Keep the signed index pair\n        uses:", "      - uses:", /must be named/],
   ["a different trigger set", "publish.yml", publish, "  schedule:\n    - cron:", "  pull_request:\n  schedule:\n    - cron:", /triggers are/],
   ["a job without a name", "publish.yml", publish, "    name: Plan\n", "", /has no name/],
 ];
 for (const [what, file, text, from, to, expected] of cases) {
   test(`the workflow gate refuses ${what}`, () => assert.match(mutated(file, text, from, to), expected));
 }
+
+test("the main-tip check comes before the signing step", () => {
+  const text = publish.replace(/      - name: Refuse a commit[\s\S]*?(?=      # The only step with the secrets)/, "");
+  const tip = publish.match(/      - name: Refuse a commit[\s\S]*?(?=      # The only step with the secrets)/)[0];
+  const moved = text.replace(/(      - uses: actions\/upload-artifact@[\s\S]*?)(?=\n      - name: Create the releases)/, `$1\n${tip.trimEnd()}`);
+  assert.match(workflowProblems("publish.yml", moved).join("\n"), /must come before/);
+});
 
 test("an unknown workflow file is refused until its triggers are declared", () => {
   assert.match(workflowProblems("other.yml", dryRun).join("\n"), /unknown workflow/);

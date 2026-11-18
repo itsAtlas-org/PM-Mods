@@ -148,6 +148,8 @@ Then, for each mod version (the first one is `atlas.map`):
 6. Wait for the dry run. The **Rebuild** job must say `MATCH` for your entry. Then merge.
 7. The merge starts Publish. Open the run, check the plan and the build's MATCH line, and **approve the
    `mod-signing` deployment**. The summary shows the release, the signed sha256 and the index seq and expiry.
+   If the new run sits at "Pending" and never starts, an **older Publish run is waiting for approval** (most
+   likely the monthly one) and holds the queue: open it in Actions and approve or reject it first.
 8. Check it independently from your own machine (no secrets needed):
    `node scripts/verify-published.mjs`. It prints the **seq**.
 9. PM side: raise `MIN_INDEX_SEQ` to the printed seq in the PM release that ships the mods (never above it), and
@@ -157,10 +159,16 @@ Then, for each mod version (the first one is `atlas.map`):
 
 - **Monthly.** The cron re-signs on the 1st, and **every scheduled run waits for you to approve `mod-signing`**; a
   deployment nobody approves fails after 30 days, and the index then runs on towards its expiry unrenewed. Approve it
-  the day it appears (a calendar reminder for the 1st). GitHub switches scheduled workflows off after 60 days without repo
+  the day it appears (a calendar reminder for the 1st). Publishes run one at a time, so a forgotten waiting run
+  also keeps every later Publish (a catalogue or blacklist merge) at "Pending" with no message: approve or reject
+  the older run first. GitHub switches scheduled workflows off after 60 days without repo
   activity and an index lives 60 days, so put a monthly reminder in your calendar and, if the cron looks stale,
   run Publish by hand (Run workflow, key_check_only off). Two missed months and PM reports "safety list not
   checked since".
+- **Only main's tip signs.** The sign job fails, before the key is touched, when its run is not for the
+  current tip of `main`. So "Re-run jobs" on an old run, or an old run that was waiting while a newer commit
+  merged, signs nothing (it would otherwise sign the old catalogue and blacklist and roll an emergency
+  revocation back). When it says "main is now at ...", run Publish again from main; do not re-run the old one.
 - **Emergency blacklist.** Edit `blacklist.json` (`{"format":1,"entries":[...]}`, the index's blacklist shape: either
   `id` + `versions` or `sha256`, then `action` `paused` or `removed`, and a one-line `reason`), open a PR, merge
   it, approve the run. The dry run builds an index with it first, so a malformed entry fails the PR instead of
@@ -189,14 +197,14 @@ release or a tag.
 - **Build failed** (`MISMATCH`, a moved dependency, a commit that is no longer fetchable). The sign job still ran
   and signed what was built: the index was renewed and the blacklist shipped, only the unbuilt entries are missing
   (the run summary lists them). The entry stays pending, so the build fails on every run until it is fixed. If the
-  cause can be fixed (see "A mismatch"), re-run the failed jobs. If it cannot, **amend or remove the entry** in a
+  cause can be fixed (see "A mismatch"), re-run the failed jobs if `main` has not moved, otherwise run Publish again. If it cannot, **amend or remove the entry** in a
   PR: the append-only gate lets an entry go or change when its release does not exist (a public 404 on its
   asset), and refuses it for a published one. Record only commits that are on `main` to avoid the fetchable-commit case.
 - **Sign refused before publishing** (the live index doesn't verify, a build isn't what the catalogue recorded, the
-  key is wrong). Nothing was uploaded. Fix the cause and re-run the failed jobs (this re-reads the live index and
-  signs again; signing is deterministic, so a package comes out identical).
-- **Publish failed after signing.** Package releases are safe to repeat: "Re-run failed jobs" finds the ones that
-  exist, checks them byte for byte and adds the missing ones. If it failed while replacing the `index` assets the
+  key is wrong). Nothing was uploaded. Fix the cause and re-run the failed jobs, or run Publish again if `main` has moved
+  since (this re-reads the live index and signs again; signing is deterministic, so a package comes out identical).
+- **Publish failed after signing.** Package releases are safe to repeat: "Re-run failed jobs" (or Publish again, if `main` has moved) finds the
+  ones that exist, checks them byte for byte and adds the missing ones. If it failed while replacing the `index` assets the
   live pair may be torn (a new `index.json` with the old signature, or one file missing): PM sees an invalid pair
   and keeps what it had, and the next run refuses to publish over it (`the index release exists but ...`). Put the
   pair back from the failed run, then check it:
@@ -205,7 +213,9 @@ release or a tag.
   gh release upload index recovered/index.json recovered/index.json.minisig -R itsAtlas-org/PM-Mods --clobber
   node scripts/verify-published.mjs --plan recovered/plan.json
   ```
-  `RUN_ID` is the number in the failed run's URL. The artifact is kept for 30 days and holds no secret. This also
+  `RUN_ID` is the number in the failed run's URL. The artifact is kept for 30 days and holds no secret. A re-run
+  of the failed jobs replaces it (the upload overwrites), so it always holds the latest attempt's pair; a sign that
+  refuses (including on a torn index) never gets as far as the upload, so the pair to restore is not touched. This also
   covers a first publish that tore (the `index` release exists with no assets): the release must stay, upload into it.
 - **The read-back failed but the upload worked.** A cache can serve the previous pair for a few minutes. Run
   `node scripts/verify-published.mjs` by hand; if it reports the new seq the publish is done (re-running the
@@ -220,7 +230,7 @@ release or a tag.
   assets on every publish and can't otherwise.
 - Never add a secret, an environment or `pull_request_target` to the dry run, and never reference the signing
   secrets from any other step. `check.mjs` fails the PR if you do.
-- Never run Publish from a branch other than `main` (the jobs refuse, and so does the environment).
+- Never run Publish from a branch other than `main`, nor re-run an old run once `main` has moved (the jobs refuse both, and the environment refuses the branch).
 - Never commit a key, a `.pmmod` or a signature other than the test vectors.
 - Never add npm, a dependency or another action to the sign job.
 
