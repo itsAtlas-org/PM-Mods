@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Bobby Yu
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# Advances the SHA pins of the actions the workflows use (the trailing "# vX.Y.Z" comment is what it
+# rewrites). The tooling itself has no dependencies. After merging a bump, run Publish once with
+# key_check_only: a bad bump would otherwise only show at the next signing approval.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]

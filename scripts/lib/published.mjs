@@ -5,6 +5,8 @@
 // reads them: the index pair first, then every entry's package against the entry. Reads are passed in
 // (public URLs, or a local folder), so it needs no secret and runs the same in the job and on a laptop.
 
+import { createHash } from "node:crypto";
+
 import { verifyIndex } from "./index.mjs";
 import { verifyPackage } from "./package.mjs";
 import { refuse } from "./rules.mjs";
@@ -42,5 +44,13 @@ export async function verifyPublished({ getIndex, getPackage, publicKeys }) {
     }
     rows.push({ id: m.id, version: m.version, sha256: m.sha256, signer: v.signer.id });
   }
-  return { seq: parsed.seq, issued: parsed.issued, expires: parsed.expires, signer: signer.id, rows, blacklist: parsed.blacklist.length };
+  return {
+    indexSha256: createHash("sha256").update(pair.json).digest("hex"),
+    seq: parsed.seq,
+    issued: parsed.issued,
+    expires: parsed.expires,
+    signer: signer.id,
+    rows,
+    blacklist: parsed.blacklist.length,
+  };
 }
