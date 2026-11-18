@@ -1,0 +1,43 @@
+{
+  "format": 1,
+  "seq": 1,
+  "issued": "2026-11-18T04:51:01Z",
+  "expires": "2027-01-17T04:51:01Z",
+  "revokedKeyIds": [],
+  "mods": [
+    {
+      "id": "atlas.map",
+      "name": "Document Map",
+      "description": "Your documents, laid out on one map by meaning or by project.",
+      "tier": "first",
+      "author": "Atlas",
+      "version": "1.1.0",
+      "api": "1.0-1.0",
+      "url": "https://github.com/itsAtlas-org/PM-Mods/releases/download/atlas.map-v1.1.0/atlas.map-1.1.0.pmmod",
+      "sha256": "b7bc51b8d1343ba5e8993ad28bfe487da4fc99036245d1f19f54b5dc05c88d8c",
+      "permissions": [
+        "documents.meta",
+        "documents.vectors",
+        "storage",
+        "ui.tab"
+      ],
+      "sourceRepo": "itsAtlas-org/Personal-Manager",
+      "commit": "6d3e88987006e3c293267fc24a1f75e9772e49b0",
+      "licence": "AGPL-3.0-or-later"
+    }
+  ],
+  "blacklist": [
+    {
+      "id": "acme.notes",
+      "versions": ">=1.0.0, <1.2.0",
+      "action": "paused",
+      "reason": "It can lose your notes on sync.",
+      "fixedIn": "1.2.0"
+    },
+    {
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "action": "removed",
+      "reason": "It sends your documents elsewhere."
+    }
+  ]
+}
