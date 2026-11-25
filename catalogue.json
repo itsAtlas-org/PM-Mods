@@ -11,6 +11,17 @@
       "path": "mods/atlas.map",
       "unsignedSha256": "6efd0b257b00b8b4a77ab9a593282a1eb1a129380e01eca97c07372558ce8909",
       "licence": "AGPL-3.0-or-later"
+    },
+    {
+      "id": "atlas.pinboard",
+      "version": "1.0.1",
+      "tier": "first",
+      "author": "Atlas",
+      "repo": "itsAtlas-org/Personal-Manager",
+      "commit": "baf0f8aa388d4a83d2a760609e47a50bc101c074",
+      "path": "mods/atlas.pinboard",
+      "unsignedSha256": "4efae16bfc093a9016b49529a65d9f97992380323551c32982dc0a25721a9b5d",
+      "licence": "AGPL-3.0-or-later"
     }
   ]
 }
