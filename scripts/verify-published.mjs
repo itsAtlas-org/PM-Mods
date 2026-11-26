@@ -7,7 +7,7 @@
 //   node scripts/verify-published.mjs            reads the public release URLs
 //   node scripts/verify-published.mjs --dir D    reads D/index.json, D/index.json.minisig, D/<id>-<version>.pmmod
 //   node scripts/verify-published.mjs --plan P   also requires the live index to be the one P (sign.mjs's
-//                                                plan.json) describes, retrying a few times while a cache
+//                                                plan.json) describes, retrying for up to 10 minutes while a cache
 //                                                still serves the old one (the publish workflow's last step)
 //
 // Prints the seq (PM's MIN_INDEX_SEQ is raised to it in the release that ships the mods, never above it),
@@ -32,8 +32,16 @@ import {
 } from "./lib/rules.mjs";
 
 const PACKAGE_CAP = 32 << 20;
-const ATTEMPTS = 6;
-const WAIT_MS = 10_000;
+/** How long the publish step waits for GitHub to serve what was just uploaded. A new release asset's
+ *  download URL can answer 404 for more than a minute after the upload succeeded (1.0.1 and 1.0.2 both
+ *  did), so the old 6 x 10 s window went red on a publish that had worked. */
+export const READ_BACK_BUDGET_MS = 10 * 60_000;
+
+/** The wait before try `attempt + 1`: 10 s at first, growing to a minute, so a quick cache is caught
+ *  quickly and a slow one is not hammered. */
+export function waitBefore(attempt) {
+  return Math.min(60_000, 10_000 * Math.ceil(attempt / 2));
+}
 const arg = (argv, name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : null);
 
 /** Null when the verified read-back `out` is the publish `plan` describes; otherwise what differs. */
@@ -58,6 +66,7 @@ async function main(argv) {
   const getPackage = (m) => (dir ? local(packageAsset(m.id, m.version)) : getPublic(m.url, PACKAGE_CAP));
 
   let out;
+  const started = Date.now();
   for (let attempt = 1; ; attempt++) {
     try {
       out = await verifyPublished({ getIndex, getPackage, publicKeys: pinnedPublicKeys() });
@@ -66,9 +75,10 @@ async function main(argv) {
       break;
     } catch (e) {
       // Only a plan is waited for: right after an upload a cache can still serve the previous pair.
-      if (!plan || attempt >= ATTEMPTS) throw e;
-      console.log(`attempt ${attempt}: ${e.message}; trying again in ${WAIT_MS / 1000}s`);
-      await new Promise((r) => setTimeout(r, WAIT_MS));
+      const wait = waitBefore(attempt);
+      if (!plan || Date.now() - started + wait > READ_BACK_BUDGET_MS) throw e;
+      console.log(`attempt ${attempt}: ${e.message}; trying again in ${wait / 1000}s`);
+      await new Promise((r) => setTimeout(r, wait));
     }
   }
   const lines = [
