@@ -16,7 +16,7 @@ import { describePackage } from "../scripts/describe-package.mjs";
 import { buildIndex, signIndex, validityWindow } from "../scripts/lib/index.mjs";
 import { outputsFor, pendingEntries } from "../scripts/plan.mjs";
 import { publish } from "../scripts/publish.mjs";
-import { planFault } from "../scripts/verify-published.mjs";
+import { planFault, READ_BACK_BUDGET_MS, waitBefore } from "../scripts/verify-published.mjs";
 import { ephemeralRing, sha256, unsignedPackage } from "./helpers.mjs";
 
 const dirs = [];
@@ -298,4 +298,21 @@ test("build-mod.sh refuses malformed input before it builds anything", () => {
     assert.notEqual(r.status, 0, JSON.stringify(over));
     assert.match(r.stderr, why, JSON.stringify(over));
   }
+});
+
+test("verify-published --plan waits long enough for a new release asset to be served", () => {
+  // 1.0.1 and 1.0.2 both saw the new .pmmod's download URL answer 404 for over a minute after a good
+  // upload. The read-back keeps trying for 10 minutes, starting at 10 s and never waiting over a minute.
+  assert.equal(READ_BACK_BUDGET_MS, 10 * 60_000);
+  assert.equal(waitBefore(1), 10_000);
+  let total = 0;
+  let tries = 1;
+  for (let attempt = 1; total + waitBefore(attempt) <= READ_BACK_BUDGET_MS; attempt++) {
+    assert.ok(waitBefore(attempt) <= 60_000, `wait ${attempt}`);
+    assert.ok(waitBefore(attempt) >= waitBefore(Math.max(1, attempt - 1)), `never shorter ${attempt}`);
+    total += waitBefore(attempt);
+    tries += 1;
+  }
+  assert.ok(total >= 9 * 60_000, `waits ${total} ms in all`);
+  assert.ok(tries >= 12, `${tries} tries`);
 });
